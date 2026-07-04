@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+
+  <key>Label</key>
+  <string>com.tailscale.tailscaled-userspace</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/tailscaled</string>
+    <string>--tun=userspace-networking</string>
+    <string>--socks5-server=127.0.0.1:1055</string>
+    <string>--outbound-http-proxy-listen=127.0.0.1:1055</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Library/Tailscale/tailscaled-userspace.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Library/Tailscale/tailscaled-userspace.stderr.log</string>
+
+</dict>
+</plist>
