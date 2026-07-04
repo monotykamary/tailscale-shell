@@ -43,6 +43,7 @@ ts: exit node cleared (direct tailnet egress)
 $ ts                  # proxied shell through the current node
 ts: env mode — socks5://127.0.0.1:1055  (HTTP_PROXY=http://127.0.0.1:1055)
   exit node: us-atl-wg-001.mullvad.ts.net · USA Atlanta, GA
+  ssh/ping: tailnet hosts via daemon (ssh nas · ping nas)
 ```
 
 ## Why
@@ -143,12 +144,14 @@ Each query remembers its last selection in `~/.config/ts/exit-node-cycle`. Re-ru
 - **Proxied shell:** `ts` exports `ALL_PROXY=socks5://127.0.0.1:1055`, `HTTP_PROXY`/`HTTPS_PROXY=http://127.0.0.1:1055`, `NO_PROXY=localhost,127.0.0.1,::1`, and `NODE_USE_ENV_PROXY=1` (Node ≥ 24), then `exec`s a login shell. Every `curl` / `git` / `npm` / `pip` / `go` / `brew` and Node app egresses through the current exit node.
 - **Exit-node picker:** parses `tailscale exit-node list`, dedupes Mullvad's "Any" + named-city duplicate rows (the same node listed twice), matches your query, and calls `tailscale set --exit-node=<host>`. The status label parses columns by 2+ spaces so a multi-word status like `selected but offline, last seen 14h ago` stays one field — and is shown when a node isn't healthy, so you know to cycle again.
 - **MagicDNS caveat:** under userspace networking, `100.100.100.100` is NOT reachable from the host, so do not point system DNS there. MagicDNS names resolve only when the proxied client does *remote* DNS (`TS_SOCKS_SCHEME=socks5h`), or via `tailscale ssh` / `tailscale nc` / `tailscale ping` (which talk to the daemon directly). Go-built CLIs only grok `socks5`, not `socks5h`.
+- **In-shell `ssh` & `ping` (MagicDNS without system DNS):** `ts` also shadows `ssh` and `ping` on `PATH` with small wrappers. Inside the env shell, `ssh <node>` reaches tailnet hosts via `tailscale nc` — the daemon resolves the MagicDNS name, so no system DNS and no hardcoded IP — and your `~/.ssh/config` is `Include`d so your `Host` aliases and `User` settings still apply. Only tailnet hosts (`100.64.0.0/10` IPs, or names `tailscale ip` resolves) are wrapped; public hosts pass through untouched. `ping <node>` routes to `tailscale ping` for tailnet hosts (ICMP can't reach `100.x` under userspace networking) and to the real `ping` otherwise.
 
 ## Caveats
 
 - Cycling is in `tailscale exit-node list` order — **not** latency-sorted. If you land on an offline node (the label says `selected but offline`), just run the query again. True "nearest" would need `tailscale ping` per candidate (not implemented).
 - The `ts` name shadows moreutils' `ts` (a timestamp-prefixing filter). Fine as long as `~/.local/bin` is early in your `PATH`.
 - The launchd installer is macOS-only; `ts` itself is platform-agnostic and works anywhere `tailscaled` runs in userspace mode.
+- The in-shell `ssh` wrapper applies `BatchMode yes` to tailnet hosts (avoids auth-method hangs against Tailscale SSH). Override with `ssh -o BatchMode=no <node>` if a tailnet host needs a password. If your tailnet's Tailscale SSH policy requires a browser "check", the first connection prints a `login.tailscale.com/a/…` URL to approve in a browser — that's a tailnet ACL setting (`ssh` `checkPeriod`), not `ts`.
 
 ## License
 

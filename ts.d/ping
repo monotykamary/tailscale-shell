@@ -1,0 +1,14 @@
+#!/bin/sh
+# ts ping wrapper — ICMP can't reach tailnet 100.x under userspace networking
+# (no tun route; SOCKS5 carries TCP only). Route tailnet targets through the
+# daemon's `tailscale ping`; leave public hosts to the real ping.
+target=
+for a in "$@"; do target="$a"; done
+case "$target" in
+  100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*)
+    exec tailscale ping "$@" ;;
+esac
+if tailscale ip "$target" >/dev/null 2>&1; then
+  exec tailscale ping "$@"
+fi
+exec "${TS_PING_REAL:-/sbin/ping}" "$@"

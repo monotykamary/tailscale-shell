@@ -1,0 +1,9 @@
+#!/bin/sh
+# ts-ssh-match — exit 0 iff $1 is a tailnet target:
+#   a 100.64.0.0/10 (CGNAT) IP, or a name the tailscale daemon resolves.
+# Used by ts's generated ssh_config `Match exec` so only tailnet hosts get the
+# MagicDNS ProxyCommand; public-host ssh passes through untouched.
+case "$1" in
+  100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) exit 0 ;;
+esac
+tailscale ip "$1" >/dev/null 2>&1

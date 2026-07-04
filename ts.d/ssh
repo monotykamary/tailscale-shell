@@ -1,0 +1,5 @@
+#!/bin/sh
+# ts ssh wrapper — route ssh through ts's generated config so tailnet MagicDNS
+# hosts resolve via the tailscale daemon (no system DNS). Public hosts pass
+# through to the user's own ~/.ssh/config (via Include in the generated config).
+exec "${TS_SSH_REAL:-/usr/bin/ssh}" -F "${TS_SSH_CONFIG:-$HOME/.config/ts/ssh_config}" "$@"
