@@ -57,6 +57,14 @@ Tailscale's [userspace-networking](https://tailscale.com/kb/1282/userspace-netwo
 
 ## Install
 
+**One line** — clones the repo, symlinks `ts` onto `~/.local/bin`, and checks deps + the proxy:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/monotykamary/tailscale-shell/main/install.sh | bash
+```
+
+This installs `ts` but does **not** build tailscale or set up the daemon — that needs Go + `sudo`, so the installer detects whether the userspace proxy is up and prints the exact next command if not. (Overrides: `TS_INSTALL_DIR` / `TS_BIN_DIR`.) The steps below are what it automates, and how to do them by hand.
+
 ### 1. `tailscaled` with userspace networking
 
 `ts` needs `tailscaled` running with `--tun=userspace-networking` (the SOCKS5/HTTP proxy on `127.0.0.1:1055`). On macOS, the included launchd installer sets that up:
