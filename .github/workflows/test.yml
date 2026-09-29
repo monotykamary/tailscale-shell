@@ -1,0 +1,41 @@
+name: Compatibility tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [22, 24]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install Linux tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh netcat-openbsd shellcheck
+      - name: Install macOS lint tool
+        if: runner.os == 'macOS'
+        run: brew list shellcheck >/dev/null 2>&1 || brew install shellcheck
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install optional Python clients
+        run: python3 -m pip install 'requests>=2,<3' 'httpx>=0.28,<1' 'aiohttp>=3,<4'
+      - name: Test
+        run: sh tests/run.sh

@@ -41,14 +41,14 @@ ts: exit node cleared (direct tailnet egress)
   now: none (tailnet direct; set one: ts <country|city|code>)
 
 $ ts                  # proxied shell through the current node
-ts: env mode — socks5://127.0.0.1:1055  (HTTP_PROXY=http://127.0.0.1:1055)
+ts: env mode — http://127.0.0.1:1055  (HTTP_PROXY=http://127.0.0.1:1055)
   exit node: us-atl-wg-001.mullvad.ts.net · USA Atlanta, GA
-  ssh/ping: tailnet hosts via daemon (ssh nas · ping nas)
+  ssh/scp/sftp/ping: tailnet hosts via daemon (ssh nas · ping nas)
 ```
 
 ## Why
 
-Tailscale's [userspace-networking](https://tailscale.com/kb/1282/userspace-networking) mode runs `tailscaled` without a system VPN extension — it exposes a local SOCKS5/HTTP proxy (`127.0.0.1:1055`) instead of a TUN interface. That sidesteps macOS SIP / VPN-extension limits and lets any process egress through your tailnet (and any Mullvad exit node) just by setting proxy env vars. But two things are missing out of the box:
+Tailscale's [userspace-networking](https://tailscale.com/kb/1282/userspace-networking) mode runs `tailscaled` without a system VPN extension — it exposes a local SOCKS5/HTTP proxy (`127.0.0.1:1055`) instead of a TUN interface. That sidesteps macOS SIP / VPN-extension limits and lets proxy-aware applications egress through your tailnet (and any Mullvad exit node) by setting proxy env vars. This is opt-in application routing, not a transparent or fail-closed VPN. But two things are missing out of the box:
 
 1. **No shell integration** — you hand-set `ALL_PROXY` / `HTTPS_PROXY` every time.
 2. **No quick exit-node picker** — `tailscale set --exit-node=<host>` means typing full hostnames like `us-atl-wg-001.mullvad.ts.net`.
@@ -101,7 +101,7 @@ Symlink it onto your `PATH`:
 ln -sf "$PWD/ts" ~/.local/bin/ts
 ```
 
-(Or add the repo to your `PATH`.) Requires `zsh`, `awk`, and optionally `jq` (for the richer `ts status` output; falls back gracefully without it).
+(Or add the repo to your `PATH`.) Requires `zsh`, `awk`, and an OpenBSD-compatible `nc` (macOS built-in or Linux `netcat-openbsd`). `jq` is optional for richer status output; `curl` is needed for `ts doctor`. SSH wrappers require OpenSSH with `Match final` support.
 
 ### 3. Authorize exit nodes
 
@@ -124,7 +124,9 @@ Your own tagged exit nodes (a home relay, a VPS) appear too — match them by ho
 | `ts` | Proxied login shell (`ALL_PROXY` / `HTTP(S)_PROXY` → the socks5/http proxy) |
 | `ts <query>` | Select an exit node by country / city / code / hostname token; re-run to cycle |
 | `ts off` | Clear the exit node (direct tailnet egress) |
-| `ts status` | Proxy + current exit node health check |
+| `ts status` | Proxy listeners + current exit node health check |
+| `ts doctor` | Verify HTTP CONNECT, SOCKS5, proxy DNS, and observed public egress |
+| `ts doctor --local` | Listener checks only; no external requests |
 | `ts help` | This help |
 
 ### Query matching
@@ -143,19 +145,77 @@ Each query remembers its last selection in `~/.config/ts/exit-node-cycle`. Re-ru
 
 | Var | Default | Purpose |
 | --- | --- | --- |
-| `TS_SOCKS_SCHEME` | `socks5` | Use `socks5h` for remote DNS (MagicDNS names resolve through the proxy) |
+| `TS_ALL_PROXY_SCHEME` | `http` | Scheme for `ALL_PROXY`: `http`, `socks5`, or `socks5h` (remote DNS) |
+| `TS_SOCKS_SCHEME` | unset | Legacy scheme override, honored unless `TS_ALL_PROXY_SCHEME` is explicitly set |
 | `TS_SOCKS_HOST` / `TS_SOCKS_PORT` | `127.0.0.1` / `1055` | The tailscale SOCKS5 proxy |
 | `TS_HTTP_PORT` | `1055` | The tailscale HTTP proxy |
+| `NO_PROXY` / `no_proxy` | Loopback hosts | Existing entries from both forms are merged and deduplicated, not discarded |
+| `TS_DOCTOR_URL` | `https://api.ipify.org` | HTTPS endpoint returning the caller's IP; contacted only by `ts doctor` |
 
 ## How it works
 
-- **Proxied shell:** `ts` exports `ALL_PROXY=socks5://127.0.0.1:1055`, `HTTP_PROXY`/`HTTPS_PROXY=http://127.0.0.1:1055`, `NO_PROXY=localhost,127.0.0.1,::1`, and `NODE_USE_ENV_PROXY=1` (Node ≥ 24), then `exec`s a login shell. Every `curl` / `git` / `npm` / `pip` / `go` / `brew` and Node app egresses through the current exit node.
+- **Proxied shell:** `ts` defaults upper/lowercase `ALL_PROXY` and `HTTP(S)_PROXY` to the HTTP listener (HTTP CONNECT also carries HTTPS), merges existing upper/lowercase `NO_PROXY` with `localhost,127.0.0.1,::1`, and sets `NODE_USE_ENV_PROXY=1`, then `exec`s a login shell. Proxy-aware clients inherit these settings. Client configuration, custom transports, or shell startup files can override them; a successful request alone does not prove proxy use. `NO_PROXY=*` is preserved with a warning because it permits direct connections.
 - **Exit-node picker:** parses `tailscale exit-node list`, dedupes Mullvad's "Any" + named-city duplicate rows (the same node listed twice), matches your query, and calls `tailscale set --exit-node=<host>`. The status label parses columns by 2+ spaces so a multi-word status like `selected but offline, last seen 14h ago` stays one field — and is shown when a node isn't healthy, so you know to cycle again.
-- **MagicDNS caveat:** under userspace networking, `100.100.100.100` is NOT reachable from the host, so do not point system DNS there. MagicDNS names resolve only when the proxied client does *remote* DNS (`TS_SOCKS_SCHEME=socks5h`), or via `tailscale ssh` / `tailscale nc` / `tailscale ping` (which talk to the daemon directly). Go-built CLIs only grok `socks5`, not `socks5h`.
-- **In-shell `ssh` & `ping` (MagicDNS without system DNS):** `ts` also shadows `ssh` and `ping` on `PATH` with small wrappers. Inside the env shell, `ssh <node>` reaches tailnet hosts via `tailscale nc` — the daemon resolves the MagicDNS name, so no system DNS and no hardcoded IP — and your `~/.ssh/config` is `Include`d so your `Host` aliases and `User` settings still apply. Only tailnet hosts (`100.64.0.0/10` IPs, or names `tailscale ip` resolves) are wrapped; public hosts pass through untouched. `ping <node>` routes to `tailscale ping` for tailnet hosts (ICMP can't reach `100.x` under userspace networking) and to the real `ping` otherwise.
+- **MagicDNS caveat:** under userspace networking, `100.100.100.100` is NOT reachable from the host, so do not point system DNS there. The HTTP proxy resolves target names remotely. For explicit SOCKS mode, use `TS_ALL_PROXY_SCHEME=socks5h` when the client supports it; `socks5` DNS behavior varies by client. `HTTP(S)_PROXY` generally takes precedence over `ALL_PROXY`, so changing the SOCKS scheme does not change HTTP proxy routing. `tailscale ssh` / `tailscale nc` / `tailscale ping` resolve through the daemon directly.
+- **SSH family:** `ssh`, `scp`, and `sftp` wrappers explicitly pass the generated SSH config, even when file-transfer tools launch `/usr/bin/ssh` directly. User and system SSH settings are loaded first; a `Match final` pass recognizes tailnet targets after `HostName` aliases resolve and supplies `tailscale nc` defaults. Explicit user `ProxyCommand`/`ProxyJump` settings take precedence. Public-host SSH retains its normal routing; it is **not automatically sent through the exit node**. A later `-F` deliberately overrides the generated config.
+- **Nested shells and upgrades:** executable discovery skips current and older wrapper directories. New shells atomically generate `ssh_config.v2`; they never overwrite the legacy `ssh_config` still used by older shells. Existing sessions keep their environment and current SSH connections.
+- **Ping:** tailnet targets use `tailscale ping` (daemon-specific flags); public targets use the real `ping`. SOCKS/HTTP proxies do not route ICMP.
+
+## CLI compatibility
+
+The offline suite checks **actual proxy traffic**, not just successful responses. Scope is the client's standard transport, not every program written in that language.
+
+| Client / transport | Coverage or required action |
+| --- | --- |
+| curl | HTTP, HTTPS CONNECT, SOCKS5 remote DNS |
+| Git over HTTP(S) | Environment proxy support; tested HTTP proxy adoption (not a complete clone) |
+| Node native `fetch`, `http`, WebSocket | Tested on modern Node; use Node ≥24.5 or ≥22.21 in the 22.x line for native fetch environment support |
+| Bun `fetch` | Tested HTTP proxy adoption |
+| Python `urllib`, Requests, HTTPX | Tested HTTP / HTTPS proxy adoption; explicit client settings can override environment |
+| Python `aiohttp` | Opt in with `aiohttp.ClientSession(trust_env=True)`; tested |
+| Go `net/http` default transport | Tested HTTP proxy adoption; custom dialers/transports may ignore the environment |
+| JVM HTTP clients | Use JVM proxy properties or library-specific configuration; tested with explicit properties |
+| SSH / SCP / SFTP | Tailnet routing and aliases covered; explicit config overrides remain available |
+| Node `http2.connect`, Python `http.client`, raw sockets | Do not automatically adopt this environment; use a proxy-capable transport or explicit tunnel |
+| UDP / QUIC / arbitrary applications | Require a different routing mechanism, usually OS/TUN networking |
+
+HTTP is the default `ALL_PROXY` fallback because clients such as HTTPX eagerly initialize SOCKS support even when `HTTPS_PROXY` takes precedence. This avoids requiring HTTPX's optional `socksio` dependency for ordinary HTTPS. To opt back into the older SOCKS fallback, use `TS_ALL_PROXY_SCHEME=socks5 ts` (or `socks5h`); an explicit legacy `TS_SOCKS_SCHEME` is still honored. HTTPX then needs `pip install 'httpx[socks]'`, and other clients may also require SOCKS extras.
+
+Pi and Claude have worked in normal use, but their custom transports and future versions are not guaranteed by these runtime tests. npm, pip, brew, cloud CLIs, gRPC, and third-party WebSocket libraries also need testing with their actual configuration. Older Node applications need a supported proxy agent or a runtime upgrade; `NODE_USE_ENV_PROXY` cannot retrofit every client.
+
+For a JVM client using standard HTTP proxy properties (adapt ports if configured differently):
+
+```sh
+java -Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=1055 \
+     -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=1055 \
+     '-Dhttp.nonProxyHosts=localhost|127.*|[::1]' -jar app.jar
+```
+
+For public-host SSH through the exit node, opt in explicitly (OpenBSD netcat syntax; adjust the endpoint as needed):
+
+```sh
+ssh -o 'ProxyCommand=nc -X connect -x 127.0.0.1:1055 %h %p' user@public-host
+```
+
+`NO_PROXY` syntax is not standardized across clients (especially IPv6, CIDR, and wildcard handling). The defaults use unbracketed `::1`; bracketed `[::1]` entries break some HTTPX versions. Prefer `localhost` for portable local-service URLs and verify any custom bypass rules with the actual client.
+
+There is no universal environment-only fix for clients that ignore proxies. Containers, `sudo`, and already-running daemons may not inherit this environment; a container also cannot reach the host proxy at its own `127.0.0.1`. Configure these explicitly rather than exposing the unauthenticated proxy on a public listener. For all-application or fail-closed routing, use OS/TUN networking and appropriate firewall policy.
+
+## Diagnostics
+
+`ts doctor` checks both configured listeners, then makes one HTTPS request through each proxy to `https://api.ipify.org`. The service sees the proxy's egress IP; no direct-egress comparison is sent. Override `TS_DOCTOR_URL` with your own HTTPS IP-echo service if preferred. TLS verification remains enabled.
+
+The HTTP check exercises CONNECT and proxy-side DNS; the SOCKS check explicitly uses `socks5h`. Both ignore `NO_PROXY` **for these checks only**. Doctor prints each observed IP and the selected exit-node label, returns nonzero on failure, and does not change the exit node or daemon. It does not prove a specific CLI used the proxy or that the public IP belongs to the intended exit node. Use `ts doctor --local` for listener-only checks without external requests.
+
+## Tests and safe updates
+
+Run `sh tests/run.sh` with Python 3.9+, OpenSSL, curl, Git, OpenSSH, and zsh. ShellCheck is used when installed. Node, Bun, Go, Java (JDK 11+), and Python Requests/HTTPX/aiohttp probes run when available; missing optional clients are reported as skips. CI installs those clients and runs on macOS/Linux with Node 22/24. Tests use temporary homes, generated test certificates, recording loopback proxies, and a mocked Tailscale daemon. No credentials, public IP service, or exit-node changes are needed.
+
+Updating the shell does not require restarting `tailscaled` or closing terminals. The installer replaces the `ts` link atomically. Existing processes keep their environment; open a fresh `ts` shell (or nest `ts` when convenient) to pick up the new exclusions and generated config. Do not delete an old checkout while active shells still have its `ts.d` directory on `PATH`.
 
 ## Caveats
 
+- Exit-node selection is daemon-wide, not per terminal: `ts <query>` and `ts off` affect every session using that daemon. Updates and `ts doctor` never change it.
 - Cycling is in `tailscale exit-node list` order — **not** latency-sorted. If you land on an offline node (the label says `selected but offline`), just run the query again. True "nearest" would need `tailscale ping` per candidate (not implemented).
 - The `ts` name shadows moreutils' `ts` (a timestamp-prefixing filter). Fine as long as `~/.local/bin` is early in your `PATH`.
 - The launchd installer is macOS-only; `ts` itself is platform-agnostic and works anywhere `tailscaled` runs in userspace mode.

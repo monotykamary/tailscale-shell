@@ -1,0 +1,24 @@
+#!/bin/sh
+# Find the underlying executable, excluding this and older ts wrapper directories.
+set -eu
+name=$1
+candidate=${2:-}
+if [ -n "$candidate" ] && [ -x "$candidate" ] && [ ! -d "$candidate" ] &&
+    [ ! -f "$(dirname "$candidate")/ts-ssh-match" ]; then
+  printf '%s\n' "$candidate"
+  exit 0
+fi
+old_ifs=$IFS
+IFS=:
+set -f
+for directory in $PATH; do
+  directory=${directory:-.}
+  if [ ! -f "$directory/ts-ssh-match" ] && [ -x "$directory/$name" ] && [ ! -d "$directory/$name" ]; then
+    IFS=$old_ifs
+    directory=$(CDPATH='' cd -- "$directory" && pwd -P)
+    printf '%s/%s\n' "$directory" "$name"
+    exit 0
+  fi
+done
+printf 'ts: cannot find an unwrapped %s executable on PATH\n' "$name" >&2
+exit 127

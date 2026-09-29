@@ -1,0 +1,5 @@
+#!/bin/sh
+# sftp may invoke an absolute ssh path; pass the shared config explicitly.
+set -eu
+real=$("$(dirname "$0")/ts-real-command" sftp "${TS_SFTP_REAL:-}")
+exec "$real" -F "${TS_SSH_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ts/ssh_config}" "$@"

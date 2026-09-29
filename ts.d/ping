@@ -11,4 +11,5 @@ esac
 if tailscale ip "$target" >/dev/null 2>&1; then
   exec tailscale ping "$@"
 fi
-exec "${TS_PING_REAL:-/sbin/ping}" "$@"
+real=$("$(dirname "$0")/ts-real-command" ping "${TS_PING_REAL:-}") || exit $?
+exec "$real" "$@"

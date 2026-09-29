@@ -44,8 +44,10 @@ fi
 # clone, or update an existing clone
 if [ -d "$INSTALL_DIR/.git" ]; then
   log "updating $INSTALL_DIR"
-  git -C "$INSTALL_DIR" pull --ff-only \
-    || warn "update failed (local changes?); run: git -C \"$INSTALL_DIR\" stash"
+  git -C "$INSTALL_DIR" pull --ff-only || {
+    warn "update failed; leaving the installed link unchanged. Inspect $INSTALL_DIR before retrying."
+    exit 1
+  }
 else
   log "cloning into $INSTALL_DIR"
   mkdir -p "$(dirname "$INSTALL_DIR")"
@@ -56,12 +58,20 @@ fi
 [ -f "$INSTALL_DIR/ts" ]    || { echo "error: $INSTALL_DIR/ts missing — clone failed?" >&2; exit 1; }
 [ -d "$INSTALL_DIR/ts.d" ] || { echo "error: $INSTALL_DIR/ts.d missing — clone incomplete?" >&2; exit 1; }
 zsh -n "$INSTALL_DIR/ts"    || { echo "error: $INSTALL_DIR/ts failed its syntax check" >&2; exit 1; }
-chmod +x "$INSTALL_DIR/ts" "$INSTALL_DIR/ts.d/ssh" "$INSTALL_DIR/ts.d/ping" "$INSTALL_DIR/ts.d/ts-ssh-match"
+for wrapper in ssh scp sftp ping ts-ssh-match ts-real-command; do
+  sh -n "$INSTALL_DIR/ts.d/$wrapper"
+  chmod +x "$INSTALL_DIR/ts.d/$wrapper"
+done
+chmod +x "$INSTALL_DIR/ts"
 
 # symlink ts onto PATH (ts.d/ stays next to the real ts; ts finds it via its
 # own resolved path, so the symlink is safe)
 mkdir -p "$BIN_DIR"
-ln -sf "$INSTALL_DIR/ts" "$BIN_DIR/ts"
+link_tmp="$BIN_DIR/.ts-link.$$"
+trap 'rm -f "$link_tmp"' EXIT HUP INT TERM
+ln -s "$INSTALL_DIR/ts" "$link_tmp"
+mv -f "$link_tmp" "$BIN_DIR/ts"
+trap - EXIT HUP INT TERM
 log "linked $(bold ts) -> $BIN_DIR/ts"
 
 case ":$PATH:" in
@@ -75,6 +85,7 @@ esac
 have awk || warn "'awk' not found — ts needs it to parse exit-node lists (apt install gawk)"
 have nc  || warn "'nc' (netcat) not found — ts needs it to probe the proxy (apt install netcat-openbsd)"
 have jq  || warn "'jq' not found — 'ts status' works without it but is plainer (brew install jq / apt install jq)"
+have curl || warn "'curl' not found — 'ts doctor' needs it for DNS and egress checks"
 
 # is the userspace tailscaled proxy up? (ts preflights this same socket)
 echo

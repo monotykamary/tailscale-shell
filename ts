@@ -5,28 +5,93 @@
 #
 # MagicDNS: under userspace networking, 100.100.100.100 is NOT reachable from
 # the host — do NOT point system DNS there. MagicDNS names resolve only when
-# the proxied client does *remote* DNS (TS_SOCKS_SCHEME=socks5h), or via
+# the client uses the HTTP proxy or SOCKS with remote DNS (socks5h), or via
 # `tailscale ssh`/`tailscale nc`/`tailscale ping <node>` (they talk to the
-# daemon directly). Go-built CLIs only grok socks5, not socks5h.
+# daemon directly). SOCKS scheme support depends on the client.
 
 set -eu
 
 TS_SOCKS_HOST="${TS_SOCKS_HOST:-127.0.0.1}"
+TS_SOCKS_HOST="${TS_SOCKS_HOST#\[}"
+TS_SOCKS_HOST="${TS_SOCKS_HOST%\]}"
 TS_SOCKS_PORT="${TS_SOCKS_PORT:-1055}"
 TS_HTTP_PORT="${TS_HTTP_PORT:-1055}"
-TS_SOCKS_SCHEME="${TS_SOCKS_SCHEME:-socks5}"
+# HTTP is dependency-free for clients that eagerly initialize ALL_PROXY (HTTPX).
+# An explicit legacy TS_SOCKS_SCHEME still opts into SOCKS.
+TS_ALL_PROXY_SCHEME="${TS_ALL_PROXY_SCHEME:-${TS_SOCKS_SCHEME:-http}}"
 TS_STATE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ts"
 TS_STATE_FILE="$TS_STATE_DIR/exit-node-cycle"
 TS_SCRIPT_DIR="${0:A:h}"
 
 preflight() {
-  if ! nc -z -G1 "$TS_SOCKS_HOST" "$TS_SOCKS_PORT" 2>/dev/null; then
-    echo "ts: nothing is listening on ${TS_SOCKS_HOST}:${TS_SOCKS_PORT}." >&2
-    echo "  start tailscaled, e.g.:" >&2
-    echo "    sudo launchctl kickstart -k system/com.tailscale.tailscaled-userspace" >&2
+  local port failed=0
+  local -a ports
+  ports=("$TS_SOCKS_PORT" "$TS_HTTP_PORT")
+  typeset -U ports
+  for port in "${ports[@]}"; do
+    if ! nc -z -w 2 "$TS_SOCKS_HOST" "$port" 2>/dev/null; then
+      echo "ts: proxy endpoint unavailable: ${TS_SOCKS_HOST}:${port}" >&2
+      failed=1
+    fi
+  done
+  if (( failed )); then
+    echo "  check tailscaled's userspace SOCKS5 and HTTP listeners." >&2
     echo "  (install: https://github.com/monotykamary/tailscale-shell#install)" >&2
+  fi
+  return "$failed"
+}
+
+proxy_url() {
+  local host="$TS_SOCKS_HOST"
+  [[ "$host" == *:* && "$host" != \[*\] ]] && host="[$host]"
+  printf '%s://%s:%s\n' "$1" "$host" "$2"
+}
+
+doctor() {
+  local failed=0 label endpoint result
+  local url="${TS_DOCTOR_URL:-https://api.ipify.org}"
+  preflight || failed=1
+  if [[ "${1:-}" == "--local" ]]; then
+    echo "ts: listener checks only; no protocol, DNS, or egress verification."
+    return "$failed"
+  fi
+  if [[ -n "${1:-}" ]]; then
+    echo "usage: ts doctor [--local]" >&2
+    return 2
+  fi
+  if [[ "$url" != https://* ]]; then
+    echo "ts: TS_DOCTOR_URL must be an HTTPS URL returning the client IP." >&2
+    return 2
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "ts: doctor needs curl for protocol, DNS, and egress checks." >&2
     return 1
   fi
+  echo "ts: checking HTTPS via both proxies (proxy-side DNS): $url"
+  for label in HTTP SOCKS5; do
+    if [[ "$label" == HTTP ]]; then
+      endpoint="$(proxy_url http "$TS_HTTP_PORT")"
+    else
+      endpoint="$(proxy_url socks5h "$TS_SOCKS_PORT")"
+    fi
+    if result="$(curl -q --fail --silent --show-error --connect-timeout 5 \
+        --max-time 15 --max-filesize 4096 --proxy "$endpoint" --noproxy '' "$url" 2>&1)"; then
+      if [[ -n "$result" && "$result" != *[^0-9a-fA-F:.]* && ( "$result" == *.* || "$result" == *:* ) ]]; then
+        printf 'PASS %s: HTTPS + proxy DNS; observed egress %s\n' "$label" "$result"
+      else
+        printf 'FAIL %s: endpoint did not return an IP address\n' "$label" >&2
+        failed=1
+      fi
+    else
+      printf 'FAIL %s: %s\n' "$label" "$result" >&2
+      failed=1
+    fi
+  done
+  echo "  selected exit node: $(current_exit_node 2>/dev/null || echo unavailable)"
+  echo "  SOCKS clients using socks5 may resolve locally; use socks5h when supported."
+  echo "  These forced-proxy checks bypass NO_PROXY; they do not certify every app."
+  echo "  No direct-egress request was made. ts is not a fail-closed VPN."
+  return "$failed"
 }
 
 current_exit_node() {
@@ -213,18 +278,24 @@ Usage:
                         ts mullvad      # any Mullvad node
   ts off              clear the exit node (direct tailnet egress)
   ts status           proxy + current exit node health check
+  ts doctor           verify HTTP/SOCKS, proxy DNS, and public egress (uses curl)
+  ts doctor --local   check listeners only; no external requests
   ts help             this help
 
 Env knobs:
-  TS_SOCKS_SCHEME     socks5 (default) | socks5h (remote DNS for MagicDNS)
+  TS_ALL_PROXY_SCHEME http (default) | socks5 | socks5h (remote DNS)
+  TS_SOCKS_SCHEME     legacy alias; explicit TS_ALL_PROXY_SCHEME wins
   TS_SOCKS_HOST/PORT  defaults 127.0.0.1 / 1055
   TS_HTTP_PORT        default 1055
+  NO_PROXY/no_proxy   existing exclusions merged with loopback defaults
+  TS_DOCTOR_URL       HTTPS IP echo endpoint (default https://api.ipify.org)
 
 Wrappers (inside the env shell — tailnet MagicDNS without system DNS):
   ssh <node>          tailnet hosts route via `tailscale nc` (MagicDNS resolved
                       by the daemon); public hosts use your ~/.ssh/config as-is.
                       Tailnet ssh is BatchMode by default (no password prompts);
                       override with `ssh -o BatchMode=no <node>`.
+  scp / sftp          use the same SSH config (including tailnet aliases)
   ping <node>         tailnet hosts route via `tailscale ping` (ICMP can't reach
                       100.x under userspace networking); public hosts use ping.
 
@@ -233,49 +304,76 @@ EOF
 }
 
 enter_env_shell() {
+  case "$TS_ALL_PROXY_SCHEME" in
+    http|socks5|socks5h) ;;
+    *) echo "ts: TS_ALL_PROXY_SCHEME must be http, socks5, or socks5h" >&2; return 2 ;;
+  esac
   preflight
-  export ALL_PROXY="${TS_SOCKS_SCHEME}://${TS_SOCKS_HOST}:${TS_SOCKS_PORT}"
+  if [[ "$TS_ALL_PROXY_SCHEME" == http ]]; then
+    export ALL_PROXY="$(proxy_url http "$TS_HTTP_PORT")"
+  else
+    export ALL_PROXY="$(proxy_url "$TS_ALL_PROXY_SCHEME" "$TS_SOCKS_PORT")"
+  fi
   export all_proxy="$ALL_PROXY"
-  export HTTP_PROXY="http://${TS_SOCKS_HOST}:${TS_HTTP_PORT}"
+  export HTTP_PROXY="$(proxy_url http "$TS_HTTP_PORT")"
   export HTTPS_PROXY="$HTTP_PROXY"
   export http_proxy="$HTTP_PROXY"
   export https_proxy="$HTTPS_PROXY"
-  export NO_PROXY="localhost,127.0.0.1,::1"
+  local exclusions="localhost,127.0.0.1,::1,${NO_PROXY:-},${no_proxy:-}" entry
+  local -a bypass
+  typeset -U bypass
+  for entry in "${(@s:,:)exclusions}"; do
+    entry="${entry//[[:space:]]/}"
+    [[ -n "$entry" ]] && bypass+=("$entry")
+  done
+  export NO_PROXY="${(j:,:)bypass}"
   export no_proxy="$NO_PROXY"
   export NODE_USE_ENV_PROXY=1
-  export TS_ROUTED_VIA="tailscale-socks5:${TS_SOCKS_HOST}:${TS_SOCKS_PORT}"
+  export TS_ROUTED_VIA="tailscale-proxy:${TS_SOCKS_HOST}:${TS_HTTP_PORT}"
   echo "ts: env mode — $ALL_PROXY  (HTTP_PROXY=$HTTP_PROXY)" >&2
-  [ "$TS_SOCKS_SCHEME" = "socks5h" ] && echo "  (socks5h: curl/python/git resolve MagicDNS remotely; Go CLIs may not grok socks5h)" >&2
+  [ "$TS_ALL_PROXY_SCHEME" = "socks5h" ] && echo "  (socks5h: remote DNS for clients that support this scheme)" >&2
+  [[ ",$NO_PROXY," == *,\*,* ]] && echo "  warning: NO_PROXY=* permits direct connections for proxy-aware clients." >&2
   if [[ "${1:-}" != "skip-exit-node" ]]; then
     echo "  exit node: $(current_exit_node)" >&2
   fi
-  # wrap ssh/ping so tailnet MagicDNS hosts resolve via the daemon (no system DNS)
-  local script_dir="$TS_SCRIPT_DIR"
-  export TS_SSH_REAL="$(command -v ssh || echo /usr/bin/ssh)"
-  export TS_PING_REAL="$(command -v ping || echo /sbin/ping)"
+  # Resolve through previous wrapper directories too, so nested shells cannot recurse.
+  local script_dir="$TS_SCRIPT_DIR" config_tmp
+  export TS_SSH_REAL="$("$script_dir/ts.d/ts-real-command" ssh "${TS_SSH_REAL:-}" 2>/dev/null || true)"
+  export TS_SCP_REAL="$("$script_dir/ts.d/ts-real-command" scp "${TS_SCP_REAL:-}" 2>/dev/null || true)"
+  export TS_SFTP_REAL="$("$script_dir/ts.d/ts-real-command" sftp "${TS_SFTP_REAL:-}" 2>/dev/null || true)"
+  export TS_PING_REAL="$("$script_dir/ts.d/ts-real-command" ping "${TS_PING_REAL:-}" 2>/dev/null || true)"
   mkdir -p "$TS_STATE_DIR"
+  config_tmp="$(mktemp "$TS_STATE_DIR/ssh_config.v2.XXXXXXXX")"
   {
-    echo "# generated by ts — proxied ssh for tailnet MagicDNS hosts (no system DNS)"
-    echo 'Match exec "ts-ssh-match %h"'
-    echo "    ProxyCommand tailscale nc %h %p"
-    echo "    CheckHostIP no"
-    echo "    BatchMode yes"
-    echo "    ConnectTimeout 10"
-    echo "    StrictHostKeyChecking accept-new"
-    echo "    UserKnownHostsFile $TS_STATE_DIR/known_hosts"
-    if [ -f "$HOME/.ssh/config" ]; then echo "Include $HOME/.ssh/config"; fi
-  } > "$TS_STATE_DIR/ssh_config"
-  export TS_SSH_CONFIG="$TS_STATE_DIR/ssh_config"
+    echo '# generated by ts — user settings first, tailnet defaults on the final pass'
+    echo 'Host *'
+    if [ -f "$HOME/.ssh/config" ]; then printf 'Include "%s"\n' "$HOME/.ssh/config"; fi
+    echo 'Host *'
+    echo 'Include /etc/ssh/ssh_config'
+    echo 'Match final exec "ts-ssh-match %h"'
+    echo '    ProxyCommand tailscale nc %h %p'
+    echo '    CheckHostIP no'
+    echo '    BatchMode yes'
+    echo '    ConnectTimeout 10'
+    echo '    StrictHostKeyChecking accept-new'
+    printf '    UserKnownHostsFile "%s"\n' "$TS_STATE_DIR/known_hosts"
+    echo 'Match all'
+  } > "$config_tmp"
+  # Never truncate the legacy config used by already-running shells.
+  mv -f "$config_tmp" "$TS_STATE_DIR/ssh_config.v2"
+  export TS_SSH_CONFIG="$TS_STATE_DIR/ssh_config.v2"
   export PATH="$script_dir/ts.d:$PATH"
-  echo "  ssh/ping: tailnet hosts via daemon (ssh nas · ping nas)" >&2
+  echo "  ssh/scp/sftp/ping: tailnet hosts via daemon (ssh nas · ping nas)" >&2
   exec "${SHELL:-/bin/zsh}" -l
 }
 
 cmd="${1:-env}"
 case "$cmd" in
   env|"") enter_env_shell ;;
+  doctor) doctor "${2:-}" ;;
   status)
-    preflight && echo "socks5/http proxy UP on ${TS_SOCKS_HOST}:${TS_SOCKS_PORT}"
+    preflight || exit 1
+    echo "SOCKS5 listener ${TS_SOCKS_HOST}:${TS_SOCKS_PORT}; HTTP listener ${TS_SOCKS_HOST}:${TS_HTTP_PORT}"
     echo "--- exit node (current) ---"; current_exit_node
     echo "--- tailscale status ---"; tailscale status 2>&1 | head -5
     echo "--- exit node suggest ---"; tailscale exit-node suggest 2>&1 | head -5
