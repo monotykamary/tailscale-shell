@@ -211,10 +211,13 @@ def tls_response(sock, context):
 
 
 class RecordingHTTP(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, *args):
         pass
 
     def do_GET(self):
+        self.close_connection = True
         self.server.hits.append(("GET", self.path))
         if self.headers.get("Upgrade", "").lower() == "websocket":
             key = self.headers["Sec-WebSocket-Key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -226,6 +229,7 @@ class RecordingHTTP(http.server.BaseHTTPRequestHandler):
         else:
             self.send_response(200)
             self.send_header("Content-Length", "2")
+            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(b"ok")
 
@@ -233,7 +237,11 @@ class RecordingHTTP(http.server.BaseHTTPRequestHandler):
         self.server.hits.append(("CONNECT", self.path))
         self.send_response(200)
         self.end_headers()
-        tls_response(self.connection, self.server.context)
+        if self.path.endswith(":443"):
+            tls_response(self.connection, self.server.context)
+        else:
+            # Node 22/24 also tunnel plain HTTP and WebSocket traffic via CONNECT.
+            RecordingHTTP(self.connection, self.client_address, self.server)
         self.close_connection = True
 
 
@@ -288,7 +296,8 @@ class ClientTests(ShellFixture):
     def assert_proxy(self, args, protocol="GET", env=None, timeout=25):
         self.http.hits.clear()
         self.run_command(args, env or self.client_env, timeout=timeout)
-        self.assertTrue(any(hit[0] == protocol and HOST in hit[1] for hit in self.http.hits), self.http.hits)
+        protocols = (protocol,) if isinstance(protocol, str) else protocol
+        self.assertTrue(any(hit[0] in protocols and HOST in hit[1] for hit in self.http.hits), self.http.hits)
 
     def test_curl_http_https_and_socks_remote_dns(self):
         self.assert_proxy(["curl", "-q", "-fsS", "--max-time", "5", f"http://{HOST}/resource"])
@@ -311,9 +320,10 @@ class ClientTests(ShellFixture):
         if not (major > 24 or major == 24 and minor >= 5 or major == 22 and minor >= 21):
             self.skipTest("requires Node >=24.5 or 22.21 for native fetch env proxy support")
         for scheme in ["http", "https"]:
-            self.assert_proxy(["node", "-e", "fetch(process.argv[1]).then(async r=>console.log(await r.text())).catch(e=>{console.error(e);process.exit(1)})", f"{scheme}://{HOST}/"], "CONNECT" if scheme == "https" else "GET")
-        self.assert_proxy(["node", "-e", "require('node:http').get(process.argv[1],r=>r.pipe(process.stdout)).on('error',()=>process.exit(1))", f"http://{HOST}/"])
-        self.assert_proxy(["node", "-e", "const w=new WebSocket(process.argv[1]);w.addEventListener('open',()=>process.exit(0));w.addEventListener('error',()=>process.exit(1));setTimeout(()=>process.exit(2),5000)", f"ws://{HOST}/"])
+            with self.subTest(scheme=scheme):
+                self.assert_proxy(["node", "-e", "fetch(process.argv[1]).then(async r=>console.log(await r.text())).catch(e=>{console.error(e);process.exit(1)})", f"{scheme}://{HOST}/"], "CONNECT" if scheme == "https" else ("GET", "CONNECT"))
+        self.assert_proxy(["node", "-e", "require('node:http').get(process.argv[1],r=>r.pipe(process.stdout)).on('error',()=>process.exit(1))", f"http://{HOST}/"], ("GET", "CONNECT"))
+        self.assert_proxy(["node", "-e", "const w=new WebSocket(process.argv[1]);w.addEventListener('open',()=>process.exit(0));w.addEventListener('error',()=>process.exit(1));setTimeout(()=>process.exit(2),5000)", f"ws://{HOST}/"], ("GET", "CONNECT"))
 
     def test_bun_fetch(self):
         if not shutil.which("bun"):
